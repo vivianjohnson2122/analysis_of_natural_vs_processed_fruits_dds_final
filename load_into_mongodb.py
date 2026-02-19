@@ -49,7 +49,7 @@ def load_data_into_mongo(mongo_uri,
                          collection_name,
                          data):
     try:
-        # connect to mongodb 
+        # connect to mongodb atlast cluster 
         client = MongoClient(mongo_uri)
         db = client[db_name]
         if collection_name in db.list_collection_names():
@@ -102,8 +102,12 @@ if __name__ == "__main__":
     # ---------------------
     # MONGO CONFIGURATIONS (make sure database name matches)
     # ---------------------
-    MONGO_URI = "mongodb://localhost:27017"
+    MONGO_ATLAS_USERNAME = os.getenv("MONGODB_ATLAS_USERNAME")
+    MONGO_ATLAS_PASSWORD = os.getenv("MONGODB_ATLAS_PASSWORD")
+    MONGO_CLUSTER_URI = "test-cluster.kay1d48.mongodb.net"
     DB_NAME = "msds697"
+    MONGO_URI = f"mongodb+srv://{MONGO_ATLAS_USERNAME}:{MONGO_ATLAS_PASSWORD}@{MONGO_CLUSTER_URI}/{DB_NAME}?retryWrites=true&w=majority"
+
 
     # ---------------------
     # LOAD DATA INTO MONGODB  
