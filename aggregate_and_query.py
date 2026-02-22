@@ -91,6 +91,20 @@ def get_fruits_by_order(MONGO_URI: str, DB_NAME: str, COLLECTION_NAME: str, orde
     collection = get_collection(MONGO_URI, DB_NAME, COLLECTION_NAME)
     return list(collection.find({"order": order}, {"_id": 0, "name": 1, "family": 1, "order": 1}))
 
+def fruit_cals_and_sugar(MONGO_URI: str, DB_NAME: str, COLLECTION_NAME: str, order: str):
+    """ Aggregates fruit data from a MongoDB collection to compute average calories and sugar content 
+    per fruit family, and returns the results sorted by sugar content."""
+    collection = get_collection(MONGO_URI, DB_NAME, COLLECTION_NAME)
+
+    pipeline = [
+        {"$group": {"_id": "$family",
+                    "fruitCount": { "$sum": 1 },
+                    "avgCalories": { "$avg": "$nutritions.calories" },
+                    "avgSugar": { "$avg": "$nutritions.sugar" }}},
+        {"$sort": { "avgSugar": -1 }}
+    ]
+
+    return list(collection.aggregate(pipeline))
 
 # QUERIES - SNACK ORIGINAL COLLECTION
 
@@ -104,7 +118,21 @@ def get_snacks_with_no_additives(MONGO_URI: str, DB_NAME: str, COLLECTION_NAME: 
     collection = get_collection(MONGO_URI, DB_NAME, COLLECTION_NAME)
     return list(collection.find({"additives_n": 0}, {"_id": 0, "product_name": 1, "nutriscore_grade": 1, "fat_100g": 1}))
 
+def snacks_fat_and_sugar(MONGO_URI: str, DB_NAME: str, COLLECTION_NAME: str, order: str):
+    """Aggregates snack product data from a MongoDB collection to compute average fat and sugar 
+    content per Nutri-Score grade, and returns the results sorted by grade."""
+    collection = get_collection(MONGO_URI, DB_NAME, COLLECTION_NAME)
 
+    pipeline = [
+        {"$match": {"nutriscore_grade": { "$nin": ["unknown", None, "not-applicable"] }}},
+        {"$group": {
+            "_id": "$nutriscore_grade",
+            "totalProducts": { "$sum": 1 },
+            "avgFat_100g": { "$avg": "$fat_100g" },
+            "avgSugars_100g": { "$avg": "$sugars_100g" }}},
+        {"$sort": { "_id": 1 }}]
+
+    return list(collection.aggregate(pipeline))
 
 # QUERIES - AGGREGATE COLLECTIONS
 
