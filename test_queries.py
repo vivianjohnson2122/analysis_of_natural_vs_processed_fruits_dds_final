@@ -1,40 +1,69 @@
-from aggregate_and_query import *
-import os
+"""Run and print results from aggregate_and_query.py to verify queries work."""
+
 from dotenv import load_dotenv
+from aggregate_and_query import (
+    get_db,
+    get_all_foods,
+    get_foods_by_category,
+    count_foods_by_category,
+    avg_nutrients_by_category,
+    top_foods_by_nutrient,
+    cross_collection_comparison,
+    NUTRIENT_IDS,
+    RAW_COLLECTIONS,
+)
 
 load_dotenv()
 
-# CONFIGURATION
-MONGO_ATLAS_USERNAME = os.getenv("MONGODB_ATLAS_USERNAME")
-MONGO_ATLAS_PASSWORD = os.getenv("MONGODB_ATLAS_PASSWORD")
-MONGO_CLUSTER_URI = "test-cluster.kay1d48.mongodb.net"
-DB_NAME = "msds697"
-MONGO_URI = f"mongodb+srv://{MONGO_ATLAS_USERNAME}:{MONGO_ATLAS_PASSWORD}@{MONGO_CLUSTER_URI}/{DB_NAME}?retryWrites=true&w=majority"
+
+def main():
+    client, db = get_db()
+
+    print("=" * 60)
+    print("TEST: Queries on Raw Collections")
+    print("=" * 60)
+
+    for coll in RAW_COLLECTIONS:
+        print(f"\n--- {coll} ---")
+
+        foods = get_all_foods(db, coll, limit=3)
+        for f in foods:
+            print(f"    {f.get('description', 'N/A')[:60]}")
+
+        cats = count_foods_by_category(db, coll)
+        print(f"    Top 3 categories: {[(c['_id'], c['count']) for c in cats[:3]]}")
+
+    print(f"\n--- Top 5 highest-calorie foods (survey) ---")
+    top_cal = top_foods_by_nutrient(db, "survey-food-data-collection", NUTRIENT_IDS["calories"], 5)
+    for f in top_cal:
+        print(f"    {f['description'][:50]:50s} | {f['value']} {f['unit']}")
+
+    print(f"\n--- Top 5 highest-protein foods (legacy) ---")
+    top_prot = top_foods_by_nutrient(db, "legacy-food-data-collection", NUTRIENT_IDS["protein"], 5)
+    for f in top_prot:
+        print(f"    {f['description'][:50]:50s} | {f['value']} {f['unit']}")
+
+    print(f"\n--- Fruits and Fruit Juices (legacy) ---")
+    fruits = get_foods_by_category(db, "legacy-food-data-collection", "Fruits and Fruit Juices")
+    print(f"    Found {len(fruits)} items")
+    for f in fruits[:5]:
+        print(f"    {f['description'][:60]}")
+
+    print(f"\n--- Cross-collection comparison ---")
+    comparison = cross_collection_comparison(db)
+    for r in comparison:
+        print(f"    {r['collection'][:30]:30s} | {r['_id']:30s} | avg={r['avgValue']:.2f}")
+
+    print(f"\n--- Avg nutrients by category (foundation) ---")
+    cats = avg_nutrients_by_category(db, "foundation-food-data-collection")
+    for c in cats[:5]:
+        print(f"    {c['_id']}")
+        for n in c["nutrients"]:
+            print(f"      {n['name']}: {n['avg']}")
+
+    client.close()
+    print("\nAll tests passed.")
 
 
-print("Testing get_all_fruits...")
-result1 = get_all_fruits(MONGO_URI, DB_NAME, "fruit-data-collection")
-print(f"Found {len(result1)} fruits")
-print(f"First result: {result1[0] if result1 else 'None'}\n")
-
-print("Testing get_fruits_by_order...")
-result2 = get_fruits_by_order(MONGO_URI, DB_NAME, "fruit-data-collection", "Rosales")
-print(f"Found {len(result2)} fruits in order Rosales")
-for item in result2:
-    print(f"  {item.get('name')}: {item.get('family')}")
-print()
-
-print("Testing get_snacks_with_no_additives...")
-result4 = get_snacks_with_no_additives(MONGO_URI, DB_NAME, "snack-data-collection")
-print(f"Found {len(result4)} snacks with no additives")
-print(f"First result: {result4[0] if result4 else 'None'}\n")
-
-
-print("Testing get_families_with_multiple_fruits...")
-result7 = get_families_with_multiple_fruits(MONGO_URI, DB_NAME, "fruit-family-aggregates")
-print(f"Found {len(result7)} families with more than 1 fruit")
-for item in result7:
-    print(f"  {item.get('_id')}: {item.get('count')} fruits - {item.get('fruits')}")
-print()
-
-print("All tests complete!")
+if __name__ == "__main__":
+    main()

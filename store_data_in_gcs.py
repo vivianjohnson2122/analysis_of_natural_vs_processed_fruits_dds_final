@@ -1,40 +1,46 @@
-# necessary imports 
-import requests 
-import numpy as np 
-import pandas as pd
-import os 
+import os
+import json
 import datetime
-import json 
+import requests
 from dotenv import load_dotenv
 from google.oauth2 import service_account
 from google.cloud import storage
 from google.api_core.exceptions import Conflict
 
-"""
-    Uploads data to Google Cloud Storage, creating the bucket if it does not exist.
 
-    Args:
-        service_account_key (str): Path to the service account JSON key file
-            used for authentication.
-        project_id (str): Google Cloud project ID where the bucket resides
-            or will be created.
-        bucket_name (str): Name of the Google Cloud Storage bucket. If the
-            bucket does not exist, it will be created.
-        file_name (str): Name of the object (file) to create in the bucket.
-        data (str): String data to upload to the bucket object.
+USDA_API_BASE = "https://api.nal.usda.gov/fdc/v1"
 
-"""
+USDA_DATASETS = {
+    "survey": {
+        "api_path": "/foods/list",
+        "params": {"dataType": ["Survey (FNDDS)"], "pageSize": 200},
+        "bucket": "survey-foods-dds-final-proj",
+        "blob_prefix": "survey_all",
+    },
+    "legacy": {
+        "api_path": "/foods/list",
+        "params": {"dataType": ["SR Legacy"], "pageSize": 200},
+        "bucket": "legacy-foods-dds-final-proj",
+        "blob_prefix": "legacy_all",
+    },
+    "foundation": {
+        "api_path": "/foods/list",
+        "params": {"dataType": ["Foundation"], "pageSize": 200},
+        "bucket": "foundation-foods-dds-final-proj",
+        "blob_prefix": "foundation_all",
+    },
+}
+
+
 def store_to_gcs(service_account_key: str,
                  project_id: str,
                  bucket_name: str,
                  file_name: str,
-                 data: str) -> None: 
-    # get credentials 
+                 data: str) -> None:
+    """Upload string data to a GCS bucket, creating the bucket if needed."""
     credentials = service_account.Credentials.from_service_account_file(service_account_key)
-    client = storage.Client(project=project_id,
-                            credentials=credentials)
-    
-    # create bucket if it doesn't exist
+    client = storage.Client(project=project_id, credentials=credentials)
+
     try:
         bucket = client.create_bucket(bucket_name)
         print(f"Bucket {bucket_name} created.")
@@ -44,53 +50,53 @@ def store_to_gcs(service_account_key: str,
 
     blob = bucket.blob(file_name)
     blob.upload_from_string(data)
-
     print(f"Uploaded {file_name} to {bucket_name}")
 
 
-if __name__ == "__main__":
-    # fruityvice json data 
-    fruit_url = 'https://www.fruityvice.com/api/fruit/all'
-    fruit_response = requests.get(fruit_url)
-    # store fruityvice data in json
-    fruit_response_json = fruit_response.json()
-    
-    # open fruit facts snack data
-    snack_url = "https://world.openfoodfacts.org/cgi/search.pl"
-    # params to filter nutritional info from snacks 
-    params = {
-        "search_terms": "",
-        "tagtype_0": "categories",
-        "tag_contains_0": "contains",
-        "tag_0": "snacks",
-        "json": 1,
-        "page_size": 100,
-        "fields": "product_name,ingredients_text,nutriscore_grade,sugars_100g,fat_100g,additives_n"
-    }
-    # store in json 
-    snack_response = requests.get(snack_url, params=params)
-    snack_response_json = snack_response.json()
+def fetch_usda_data(api_key: str, dataset_key: str) -> list:
+    """Fetch all pages of a USDA FoodData Central dataset."""
+    cfg = USDA_DATASETS[dataset_key]
+    all_foods = []
+    page = 1
 
-    # loading in env vars for service acc and project 
+    while True:
+        params = {**cfg["params"], "pageNumber": page, "api_key": api_key}
+        resp = requests.post(f"{USDA_API_BASE}{cfg['api_path']}", json=params)
+        resp.raise_for_status()
+        foods = resp.json()
+        if not foods:
+            break
+        all_foods.extend(foods)
+        print(f"  {dataset_key} page {page}: {len(foods)} items (total: {len(all_foods)})")
+        page += 1
+
+    return all_foods
+
+
+def ingest_dataset_to_gcs(dataset_key: str):
+    """Fetch a USDA dataset and upload the JSON to GCS."""
     load_dotenv()
-    # keys, proj id
     sa_key = os.getenv("GCP_SERVICE_ACCOUNT_KEY")
-    proj_id = os.getenv('GCP_PROJECT_ID')
-    # bucket names 
-    fruit_bucket_name = 'fruit-data-dds-final-proj'
-    snack_bucket_name = 'snack-data-dds-final-proj'
-    # file names 
-    fruit_file_name = f'fruit_all/{datetime.date.today()}.json'
-    snack_file_name = f'snack_all/{datetime.date.today()}.json'
-    # store fruityvice data to gcs
-    store_to_gcs(service_account_key=sa_key,
-                project_id=proj_id,
-                bucket_name=fruit_bucket_name,
-                file_name=fruit_file_name,
-                data=json.dumps(fruit_response_json))
-    # store snack data to gcs
-    store_to_gcs(service_account_key=sa_key,
-                 project_id=proj_id,
-                 bucket_name=snack_bucket_name,
-                 file_name=snack_file_name,
-                 data=json.dumps(snack_response_json))
+    proj_id = os.getenv("GCP_PROJECT_ID")
+    api_key = os.getenv("USDA_API_KEY", "DEMO_KEY")
+
+    cfg = USDA_DATASETS[dataset_key]
+    data = fetch_usda_data(api_key, dataset_key)
+    file_name = f"{cfg['blob_prefix']}/{datetime.date.today()}.json"
+
+    store_to_gcs(
+        service_account_key=sa_key,
+        project_id=proj_id,
+        bucket_name=cfg["bucket"],
+        file_name=file_name,
+        data=json.dumps(data),
+    )
+    return len(data)
+
+
+if __name__ == "__main__":
+    load_dotenv()
+    for key in USDA_DATASETS:
+        print(f"\n--- Ingesting {key} ---")
+        count = ingest_dataset_to_gcs(key)
+        print(f"  -> {count} documents uploaded")

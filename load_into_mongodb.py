@@ -1,123 +1,97 @@
-import json 
-from pymongo import MongoClient
-from pymongo.errors import OperationFailure
-import os 
+import os
+import json
+import datetime
 from dotenv import load_dotenv
+from pymongo import MongoClient
 from google.oauth2 import service_account
 from google.cloud import storage
-import requests
-import datetime 
 
-"""
-    Retrieves the data in JSON format from the specified GCS bucket.
 
-    Args:
-        service_account_key (str): Path to the service account JSON key file
-            used for authentication.
-        project_id (str): Google Cloud project ID where the bucket resides
-            or will be created.
-        bucket_name (str): Name of the Google Cloud Storage bucket. If the
-            bucket does not exist, it will be created.
-        file_name (str): Name of the object (file) to create in the bucket.
-"""
+USDA_COLLECTIONS = {
+    "survey": {
+        "bucket": "survey-foods-dds-final-proj",
+        "blob_prefix": "survey_all",
+        "collection": "survey-food-data-collection",
+    },
+    "legacy": {
+        "bucket": "legacy-foods-dds-final-proj",
+        "blob_prefix": "legacy_all",
+        "collection": "legacy-food-data-collection",
+    },
+    "foundation": {
+        "bucket": "foundation-foods-dds-final-proj",
+        "blob_prefix": "foundation_all",
+        "collection": "foundation-food-data-collection",
+    },
+}
+
+
 def retrieve_data_from_gcs(service_account_key: str,
                            project_id: str,
                            bucket_name: str,
                            file_name: str) -> list:
+    """Download JSON data from a GCS bucket."""
     credentials = service_account.Credentials.from_service_account_file(service_account_key)
-    client = storage.Client(project=project_id,
-                            credentials=credentials)
+    client = storage.Client(project=project_id, credentials=credentials)
     bucket = client.bucket(bucket_name)
-    file = bucket.blob(file_name)
-    content = json.loads(file.download_as_string())
+    blob = bucket.blob(file_name)
+    content = json.loads(blob.download_as_string())
     return content
 
-"""
-    Load data (a list of dictionaries) into MongoDB database 
-    Checks if the collection name exists, if it does - adds it, if not - creates
-    and adds the data into collection
 
-    Args:
-        mongo_uri (str): The MongoDB connection URI (e.g., "mongodb://localhost:27017").
-        db_name (str): Name of the database where the collection resides or will be created.
-        collection_name (str): Name of the collection to insert data into.
-        data (list of dict): A list of dictionaries representing documents to insert.
+def load_data_into_mongo(mongo_uri: str,
+                         db_name: str,
+                         collection_name: str,
+                         data: list,
+                         replace: bool = True):
+    """Insert documents into a MongoDB collection.
+    If replace=True, drops the existing collection first to avoid duplicates."""
+    client = MongoClient(mongo_uri)
+    db = client[db_name]
 
-"""
-def load_data_into_mongo(mongo_uri,
-                         db_name,
-                         collection_name,
-                         data):
-    try:
-        # connect to mongodb atlast cluster 
-        client = MongoClient(mongo_uri)
-        db = client[db_name]
-        if collection_name in db.list_collection_names():
-            # collection exists already
-            print(f'The collection {collection_name} exists... adding into {collection_name}')
-        else: 
-            # collection doesn't exist - create  
-            print(f'The collection {collection_name} already exists ...creating and adding into {collection_name}')
-            db.create_collection(collection_name)
-        
-        collection = db[collection_name]
-        result = collection.insert_many(data)
-        print(f"Inserted {len(result.inserted_ids)} documents")
+    if replace and collection_name in db.list_collection_names():
+        db[collection_name].drop()
+        print(f"  Dropped existing collection: {collection_name}")
 
-        # close connection 
-        client.close()
-        print('MongoDB Connection Closed')
-    
-    except Exception as e:
-        print(e)
+    collection = db[collection_name]
+    result = collection.insert_many(data)
+    print(f"  Inserted {len(result.inserted_ids)} documents into {collection_name}")
+    client.close()
+
+
+def get_mongo_uri() -> str:
+    username = os.getenv("MONGODB_ATLAS_USERNAME")
+    password = os.getenv("MONGODB_ATLAS_PASSWORD")
+    host = os.getenv("MONGODB_CLUSTER_HOST")
+    return f"mongodb+srv://{username}:{password}@{host}/?retryWrites=true&w=majority"
+
+
+def load_dataset_gcs_to_mongo(dataset_key: str, date_str: str = None):
+    """Load a single USDA dataset from GCS into MongoDB."""
+    load_dotenv()
+    sa_key = os.getenv("GCP_SERVICE_ACCOUNT_KEY")
+    proj_id = os.getenv("GCP_PROJECT_ID")
+    db_name = os.getenv("MONGODB_DB_NAME", "msds697")
+
+    if date_str is None:
+        date_str = str(datetime.date.today())
+
+    cfg = USDA_COLLECTIONS[dataset_key]
+    file_name = f"{cfg['blob_prefix']}/{date_str}.json"
+
+    print(f"  Retrieving from GCS: {cfg['bucket']}/{file_name}")
+    data = retrieve_data_from_gcs(sa_key, proj_id, cfg["bucket"], file_name)
+
+    mongo_uri = get_mongo_uri()
+    print(f"  Loading {len(data)} docs into MongoDB: {cfg['collection']}")
+    load_data_into_mongo(mongo_uri, db_name, cfg["collection"], data, replace=True)
+
+    return len(data)
 
 
 if __name__ == "__main__":
-    # ---------------------
-    # SETTING ENVIRONMENT VARS 
-    # ---------------------
     load_dotenv()
-    # keys, proj id
-    sa_key = os.getenv("GCP_SERVICE_ACCOUNT_KEY")
-    proj_id = os.getenv('GCP_PROJECT_ID')
-    # bucket names 
-    fruit_bucket_name = 'fruit-data-dds-final-proj'
-    snack_bucket_name = 'snack-data-dds-final-proj'
-    # file names 
-    fruit_file_name = f'fruit_all/{datetime.date.today()}.json'
-    snack_file_name = f'snack_all/{datetime.date.today()}.json'
-
-    # ---------------------
-    # GET DATA FROM GCS
-    # ---------------------
-    fruit_data = retrieve_data_from_gcs(service_account_key=sa_key,
-                                        project_id=proj_id,
-                                        bucket_name=fruit_bucket_name,
-                                        file_name=fruit_file_name)
-    snack_data = retrieve_data_from_gcs(service_account_key=sa_key,
-                                        project_id=proj_id,
-                                        bucket_name=snack_bucket_name,
-                                        file_name=snack_file_name)
-    
-    # ---------------------
-    # MONGO CONFIGURATIONS (make sure database name matches)
-    # ---------------------
-    MONGO_ATLAS_USERNAME = os.getenv("MONGODB_ATLAS_USERNAME")
-    MONGO_ATLAS_PASSWORD = os.getenv("MONGODB_ATLAS_PASSWORD")
-    MONGO_CLUSTER_URI = "test-cluster.kay1d48.mongodb.net"
-    DB_NAME = "msds697"
-    MONGO_URI = f"mongodb+srv://{MONGO_ATLAS_USERNAME}:{MONGO_ATLAS_PASSWORD}@{MONGO_CLUSTER_URI}/{DB_NAME}?retryWrites=true&w=majority"
-
-
-    # ---------------------
-    # LOAD DATA INTO MONGODB  
-    # ---------------------
-    load_data_into_mongo(mongo_uri=MONGO_URI,
-                         db_name=DB_NAME,
-                         collection_name='fruit-data-collection',
-                         data=fruit_data)
-    
-    load_data_into_mongo(mongo_uri=MONGO_URI,
-                         db_name=DB_NAME,
-                         collection_name='snack-data-collection',
-                         data=snack_data)
+    for key in USDA_COLLECTIONS:
+        print(f"\n--- Loading {key} from GCS to MongoDB ---")
+        count = load_dataset_gcs_to_mongo(key, date_str="2026-03-05")
+        print(f"  -> {count} documents loaded")
