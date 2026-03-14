@@ -7,7 +7,7 @@ from pyspark.sql import SparkSession
 from pyspark.sql import functions as F
 from pyspark.sql.types import StructType, StructField, StringType, DoubleType, IntegerType
 from pyspark.ml.feature import VectorAssembler
-from pyspark.ml.classification import RandomForestClassifier
+from pyspark.ml.classification import RandomForestClassifier, GBTClassifier
 from pyspark.ml.evaluation import MulticlassClassificationEvaluator, BinaryClassificationEvaluator
 from pyspark.ml import Pipeline
 
@@ -39,6 +39,7 @@ def get_spark() -> SparkSession:
         .appName("USDA_Food_Classification")
         .config("spark.driver.memory", "4g")
         .config("spark.sql.shuffle.partitions", "8")
+        .config("spark.driver.maxResultSize", "2g")
         .getOrCreate()
     )
 
@@ -224,7 +225,7 @@ def run_spark_queries(spark: SparkSession, labeled_df):
     return query_results
 
 
-# ── Step 4: Random Forest ML Pipeline ────────────────────────────────────
+# ── Step 4a: Random Forest ML Pipeline ────────────────────────────────────
 
 def train_random_forest(labeled_df):
     """Train a Random Forest classifier to predict healthy vs unhealthy."""
@@ -297,49 +298,174 @@ def train_random_forest(labeled_df):
     return model, predictions, metrics
 
 
-# ── Step 5: Save results locally ─────────────────────────────────────────
+# ── Step 4a: Gradient Boosted Trees ML Pipeline ────────────────────────────────────
 
-def save_results_locally(predictions, metrics, query_results):
-    """Save predictions and metrics to local files (GCS upload deferred)."""
+def train_gradient_boosted_trees(labeled_df):
+    """
+    Train a gradient boosted trees classifier to predict healthy vs. unhealthy  food
+    """
+    print("\n" + "=" * 60)
+    print("STEP 4b: Gradient Boosted Trees Classifier")
+    print("=" * 60)
+
+    ml_df = labeled_df.select(FEATURE_COLS + ['label', 'description', 'foodCategory'])
+
+    for col in FEATURE_COLS:
+        ml_df = ml_df.withColumn(col, F.coalesce(F.col(col), F.lit(0.0)))
+
+    ml_df = ml_df.filter(F.col('label').isNotNull())
+
+    assembler = VectorAssembler(inputCols=FEATURE_COLS, outputCol="features")
+    gbt = GBTClassifier(
+        featuresCol="features",
+        labelCol="label",
+        maxIter=100,
+        maxDepth=8,
+        stepSize=0.1,
+        seed=42,
+    )
+
+    pipeline = Pipeline(stages=[assembler,gbt])
+
+    # use same 80/20 split and seed as RandomForest model 
+    train_df, test_df = ml_df.randomSplit([0.8, 0.2], seed=42)
+    print(f"  Train: {train_df.count()} | Test: {test_df.count()}")
+
+    start = time.time()
+    model = pipeline.fit(train_df)
+    train_time = time.time() - start
+    print(f"  Training time: {train_time:.2f}s")
+
+    # predictions 
+    predictions = model.transform(test_df)
+
+    acc_eval = MulticlassClassificationEvaluator(
+        labelCol="label",
+        predictionCol="prediction"
+    )
+
+    # outputs predictions as 2-element vector 
+    auc_eval = BinaryClassificationEvaluator(
+        labelCol="label",
+        rawPredictionCol="rawPrediction"
+    )
+
+    metrics = {
+        "accuracy": round(acc_eval.evaluate(predictions, {acc_eval.metricName: "accuracy"}), 4),
+        "precision": round(acc_eval.evaluate(predictions, {acc_eval.metricName: "weightedPrecision"}), 4),
+        "recall": round(acc_eval.evaluate(predictions, {acc_eval.metricName: "weightedRecall"}), 4),
+        "f1": round(acc_eval.evaluate(predictions, {acc_eval.metricName: "f1"}), 4),
+        "auc": round(auc_eval.evaluate(predictions), 4),
+        "train_time_s": round(train_time, 2),
+        "train_size": train_df.count(),
+        "test_size": test_df.count(),
+        "max_iter": 100,
+        "max_depth": 8,
+        "step_size": 0.1,
+    }
+
+    print(f"\n  --- Evaluation Metrics ---")
+    for k, v in metrics.items():
+        print(f"    {k:>20s}: {v}")
+
+    gbt_model = model.stages[-1]
+    importances = gbt_model.featureImportances.toArray()
+    print(f"\n  --- Feature Importances ---")
+    for feat, imp in sorted(zip(FEATURE_COLS, importances), key=lambda x: -x[1]):
+        bar = "#" * int(imp * 40)
+        print(f"    {feat:>15s}: {imp:.4f}  {bar}")
+ 
+    print(f"\n  --- Sample Predictions ---")
+    predictions.select(
+        "description", "foodCategory", "label", "prediction", "probability"
+    ).show(15, truncate=40)
+ 
+    return model, predictions, metrics
+
+
+# ── Step 5: Save results locally ─────────────────────────────────────────
+ 
+def save_results_locally(
+    rf_predictions, rf_metrics,
+    gbt_predictions, gbt_metrics,
+    query_results,
+):
+    """Save predictions and metrics for both models to local files."""
     print("\n" + "=" * 60)
     print("STEP 5: Saving results locally")
     print("=" * 60)
-
+ 
     os.makedirs(OUTPUT_DIR, exist_ok=True)
-
-    metrics_path = os.path.join(OUTPUT_DIR, "model_metrics.json")
-    with open(metrics_path, "w") as f:
-        json.dump(metrics, f, indent=2)
-    print(f"  Saved metrics -> {metrics_path}")
-
-    query_path = os.path.join(OUTPUT_DIR, "query_timing.json")
-    with open(query_path, "w") as f:
-        json.dump(query_results, f, indent=2)
-    print(f"  Saved query timing -> {query_path}")
-
-    pred_path = os.path.join(OUTPUT_DIR, "predictions.csv")
-    pred_pdf = predictions.select(
+ 
+    # ── Random Forest outputs ──────────────────────────────────────────────
+    rf_metrics_path = os.path.join(OUTPUT_DIR, "rf_model_metrics.json")
+    with open(rf_metrics_path, "w") as f:
+        json.dump(rf_metrics, f, indent=2)
+    print(f"  Saved RF metrics      -> {rf_metrics_path}")
+ 
+    rf_pred_path = os.path.join(OUTPUT_DIR, "rf_predictions.csv")
+    rf_pred_pdf = rf_predictions.select(
         "description", "foodCategory", "label", "prediction",
         *FEATURE_COLS
     ).toPandas()
-    pred_pdf.to_csv(pred_path, index=False)
-    print(f"  Saved predictions ({len(pred_pdf)} rows) -> {pred_path}")
+    rf_pred_pdf.to_csv(rf_pred_path, index=False)
+    print(f"  Saved RF predictions  ({len(rf_pred_pdf)} rows) -> {rf_pred_path}")
+ 
+    # ── GBT outputs ───────────────────────────────────────────────────────
+    gbt_metrics_path = os.path.join(OUTPUT_DIR, "gbt_model_metrics.json")
+    with open(gbt_metrics_path, "w") as f:
+        json.dump(gbt_metrics, f, indent=2)
+    print(f"  Saved GBT metrics     -> {gbt_metrics_path}")
+ 
+    gbt_pred_path = os.path.join(OUTPUT_DIR, "gbt_predictions.csv")
+    gbt_pred_pdf = gbt_predictions.select(
+        "description", "foodCategory", "label", "prediction",
+        *FEATURE_COLS
+    ).toPandas()
+    gbt_pred_pdf.to_csv(gbt_pred_path, index=False)
+    print(f"  Saved GBT predictions ({len(gbt_pred_pdf)} rows) -> {gbt_pred_path}")
+ 
+    # ── Combined model comparison ─────────────────────────────────────────
+    comparison = {
+        "random_forest": rf_metrics,
+        "gradient_boosted_trees": gbt_metrics,
+    }
+    comparison_path = os.path.join(OUTPUT_DIR, "model_comparison.json")
+    with open(comparison_path, "w") as f:
+        json.dump(comparison, f, indent=2)
+    print(f"  Saved model comparison -> {comparison_path}")
+ 
+    print("\n  --- Model Comparison Summary ---")
+    header = f"  {'Metric':<20s}  {'Random Forest':>15s}  {'GBT':>15s}"
+    print(header)
+    print("  " + "-" * (len(header) - 2))
+    for key in ("accuracy", "precision", "recall", "f1", "auc", "train_time_s"):
+        rf_val  = rf_metrics.get(key, "N/A")
+        gbt_val = gbt_metrics.get(key, "N/A")
+        print(f"  {key:<20s}  {str(rf_val):>15s}  {str(gbt_val):>15s}")
+ 
+    # ── Query timing ──────────────────────────────────────────────────────
+    query_path = os.path.join(OUTPUT_DIR, "query_timing.json")
+    with open(query_path, "w") as f:
+        json.dump(query_results, f, indent=2)
+    print(f"\n  Saved query timing    -> {query_path}")
+ 
     print(f"\n  All local outputs in: {OUTPUT_DIR}/")
-
-
+ 
+ 
 def upload_results_to_gcs():
     """Upload local output/ directory to GCS. Call separately when ready to deploy."""
     from google.oauth2 import service_account
     from google.cloud import storage
-
+ 
     key_path = os.getenv("GCP_SERVICE_ACCOUNT_KEY")
     project_id = os.getenv("GCP_PROJECT_ID")
     credentials = service_account.Credentials.from_service_account_file(key_path)
     client = storage.Client(project=project_id, credentials=credentials)
-
+ 
     bucket_name = "survey-foods-dds-final-proj"
     bucket = client.bucket(bucket_name)
-
+ 
     for fname in os.listdir(OUTPUT_DIR):
         fpath = os.path.join(OUTPUT_DIR, fname)
         if os.path.isfile(fpath):
@@ -347,26 +473,37 @@ def upload_results_to_gcs():
             blob = bucket.blob(blob_path)
             blob.upload_from_filename(fpath)
             print(f"  Uploaded {fname} -> gs://{bucket_name}/{blob_path}")
-
-
+ 
+ 
 # ── Main ─────────────────────────────────────────────────────────────────
-
+ 
 if __name__ == "__main__":
     spark = get_spark()
     spark.sparkContext.setLogLevel("WARN")
-
+     
+    # Suppress DAGScheduler broadcast warnings
+    log4j = spark.sparkContext._jvm.org.apache.log4j
+    log4j.LogManager.getLogger("org.apache.spark.scheduler.DAGScheduler") \
+        .setLevel(log4j.Level.ERROR)
     try:
         dfs = load_raw_dataframes(spark)
         labeled_df = label_foods(dfs["all_foods"])
         query_results = run_spark_queries(spark, labeled_df)
-        model, predictions, metrics = train_random_forest(labeled_df)
-        save_results_locally(predictions, metrics, query_results)
-
+ 
+        rf_model, rf_predictions, rf_metrics = train_random_forest(labeled_df)
+        gbt_model, gbt_predictions, gbt_metrics = train_gradient_boosted_trees(labeled_df)
+ 
+        save_results_locally(
+            rf_predictions, rf_metrics,
+            gbt_predictions, gbt_metrics,
+            query_results,
+        )
+ 
         print("\n" + "=" * 60)
         print("PIPELINE COMPLETE")
         print("=" * 60)
         print("  To upload results to GCS, run:")
         print("    python -c \"from spark_ml_pipeline import upload_results_to_gcs; upload_results_to_gcs()\"")
-
+ 
     finally:
         spark.stop()
