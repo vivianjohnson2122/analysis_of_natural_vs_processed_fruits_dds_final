@@ -1,10 +1,11 @@
 """
 DAG 2: MongoDB aggregation + Spark ML pipeline.
-    MongoDB Atlas -> Flatten & Label (aggregation) -> PySpark Random Forest
+    MongoDB Atlas -> Flatten & Label (aggregation) -> PySpark Random Forest + GBT
 
 Runs the MongoDB aggregation pipeline to flatten nutrients and label
-foods as healthy/unhealthy, then trains a Random Forest classifier
-in PySpark and evaluates model performance.
+foods as healthy/unhealthy, then trains both a Random Forest classifier
+and a Gradient Boosted Trees classifier in PySpark, evaluates both
+models, and saves per-model outputs plus a side-by-side comparison.
 """
 
 import sys
@@ -46,7 +47,11 @@ def spark_ml_dag():
 
     @task()
     def run_spark_pipeline(agg_summary: dict) -> dict:
-        """Load data into Spark, run SparkSQL queries, train Random Forest."""
+        """
+        Load data into Spark, run SparkSQL queries, train Random Forest
+        and Gradient Boosted Trees classifiers, save all outputs and a
+        side-by-side model comparison.
+        """
         from pyspark.sql import SparkSession
 
         from spark_ml_pipeline import (
@@ -54,6 +59,7 @@ def spark_ml_dag():
             label_foods,
             run_spark_queries,
             train_random_forest,
+            train_gradient_boosted_trees,
             save_results_locally,
         )
 
@@ -68,12 +74,22 @@ def spark_ml_dag():
             dfs = load_raw_dataframes(spark)
             labeled_df = label_foods(dfs["all_foods"])
             query_results = run_spark_queries(spark, labeled_df)
-            model, predictions, metrics = train_random_forest(labeled_df)
-            save_results_locally(predictions, metrics, query_results)
+
+            rf_model, rf_predictions, rf_metrics = train_random_forest(labeled_df)
+            gbt_model, gbt_predictions, gbt_metrics = train_gradient_boosted_trees(labeled_df)
+
+            save_results_locally(
+                rf_predictions, rf_metrics,
+                gbt_predictions, gbt_metrics,
+                query_results,
+            )
         finally:
             spark.stop()
 
-        return metrics
+        return {
+            "random_forest": rf_metrics,
+            "gradient_boosted_trees": gbt_metrics,
+        }
 
     agg_summary = run_mongo_aggregation()
     metrics = run_spark_pipeline(agg_summary)

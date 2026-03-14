@@ -18,7 +18,14 @@ if PROJECT_ROOT not in sys.path:
     sys.path.insert(0, PROJECT_ROOT)
 
 GCS_BUCKET = "survey-foods-dds-final-proj"
-OUTPUT_FILES = ["model_metrics.json", "predictions.csv", "query_timing.json"]
+OUTPUT_FILES = [
+    "rf_model_metrics.json",
+    "rf_predictions.csv",
+    "gbt_model_metrics.json",
+    "gbt_predictions.csv",
+    "model_comparison.json",
+    "query_timing.json",
+]
 
 
 @dag(
